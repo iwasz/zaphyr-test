@@ -23,7 +23,6 @@
 #include <logging/log.h>
 #include <shell/shell.h>
 #include <shell/shell_uart.h>
-// #include <stdio.h>
 #include <sys/printk.h>
 #include <version.h>
 #include <zephyr.h>
