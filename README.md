@@ -234,3 +234,5 @@ No ```<cstdio>``` or other C++ header? Check these settings in menuconfig:
   - External C Library
 - Changing prj.conf file clears ```ninja guiconfig``` config.
 - **Save minimal** in ```ninja guiconfig``` works correctly only after **Save** was clicked beforehand.
+
+

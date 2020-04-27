@@ -211,7 +211,8 @@ static void client_init (struct mqtt_client *client)
 /* In this routine we block until the connected variable is 1 */
 static int try_to_connect (struct mqtt_client *client)
 {
-        int rc, i = 0;
+        int rc = 0;
+        int i = 0;
 
         while (i++ < APP_CONNECT_TRIES && !connected) {
 
@@ -262,7 +263,8 @@ static int process_mqtt_and_sleep (struct mqtt_client *client, int timeout)
                         PRINT_RESULT ("mqtt_live", rc);
                         return rc;
                 }
-                else if (rc == 0) {
+
+                if (rc == 0) {
                         rc = mqtt_input (client);
                         if (rc != 0) {
                                 PRINT_RESULT ("mqtt_input", rc);
@@ -278,20 +280,22 @@ static int process_mqtt_and_sleep (struct mqtt_client *client, int timeout)
 
 #define SUCCESS_OR_EXIT(rc)                                                                                                                     \
         {                                                                                                                                       \
-                if (rc != 0) {                                                                                                                  \
+                if ((rc) != 0) {                                                                                                                \
                         return 1;                                                                                                               \
                 }                                                                                                                               \
         }
 #define SUCCESS_OR_BREAK(rc)                                                                                                                    \
         {                                                                                                                                       \
-                if (rc != 0) {                                                                                                                  \
+                if ((rc) != 0) {                                                                                                                \
                         break;                                                                                                                  \
                 }                                                                                                                               \
         }
 
 static int publisher (void)
 {
-        int i, rc, r = 0;
+        int i = 0;
+        int rc = 0;
+        int r = 0;
 
         LOG_INF ("attempting to connect: ");
         rc = try_to_connect (&client_ctx);

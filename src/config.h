@@ -8,7 +8,7 @@
 #define __CONFIG_H__
 
 // #define ZEPHYR_ADDR "192.168.1.101"
-// #define SERVER_ADDR "192.168.0.29"
+#define SERVER_ADDR "192.168.0.29"
 #define SERVER_PORT 1883
 
 #define APP_SLEEP_MSECS 500
