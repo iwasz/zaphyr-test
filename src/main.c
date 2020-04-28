@@ -1,368 +1,159 @@
-/*
- * Copyright (c) 2017 Intel Corporation
- *
- * SPDX-License-Identifier: Apache-2.0
- */
-
-#include <logging/log.h>
-LOG_MODULE_REGISTER (mqtt_publisher, LOG_LEVEL_DBG);
-
-#include <net/mqtt.h>
-#include <net/socket.h>
-#include <zephyr.h>
-
-#include <errno.h>
-#include <string.h>
-
 #include "config.h"
 #include "dhcp.h"
+#include <drivers/video.h>
+#include <errno.h>
+#include <logging/log.h>
+#include <net/socket.h>
+#include <string.h>
+#include <zephyr.h>
+LOG_MODULE_REGISTER (main, LOG_LEVEL_DBG);
 
-/* Buffers for MQTT client. */
-static u8_t rx_buffer[APP_MQTT_BUFFER_SIZE];
-static u8_t tx_buffer[APP_MQTT_BUFFER_SIZE];
+#define VIDEO_CAPTURE_DEV "VIDEO_SW_GENERATOR"
 
-/* The mqtt client struct */
-static struct mqtt_client client_ctx;
+#define MY_PORT 5000
+#define MAX_CLIENT_QUEUE 1
 
-/* MQTT Broker details. */
-static struct sockaddr_storage broker;
-
-static struct pollfd fds[1];
-static int nfds;
-
-static bool connected;
-
-static void prepare_fds (struct mqtt_client *client)
+static ssize_t sendall (int sock, const void *buf, size_t len)
 {
-        if (client->transport.type == MQTT_TRANSPORT_NON_SECURE) {
-                fds[0].fd = client->transport.tcp.sock;
-        }
+        while (len) {
+                ssize_t out_len = send (sock, buf, len, 0);
 
-        fds[0].events = ZSOCK_POLLIN;
-        nfds = 1;
-}
-
-static void clear_fds (void) { nfds = 0; }
-
-static int wait (int timeout)
-{
-        int ret = 0;
-
-        if (nfds > 0) {
-                ret = poll (fds, nfds, timeout);
-
-                if (ret < 0) {
-                        LOG_ERR ("poll error: %d", errno);
+                if (out_len < 0) {
+                        return out_len;
                 }
-        }
-
-        return ret;
-}
-
-void mqtt_evt_handler (struct mqtt_client *const client, const struct mqtt_evt *evt)
-{
-        int err;
-
-        switch (evt->type) {
-        case MQTT_EVT_CONNACK:
-                if (evt->result != 0) {
-                        LOG_ERR ("MQTT connect failed %d", evt->result);
-                        break;
-                }
-
-                connected = true;
-                LOG_INF ("MQTT client connected!");
-
-                break;
-
-        case MQTT_EVT_DISCONNECT:
-                LOG_INF ("MQTT client disconnected %d", evt->result);
-
-                connected = false;
-                clear_fds ();
-
-                break;
-
-        case MQTT_EVT_PUBACK:
-                if (evt->result != 0) {
-                        LOG_ERR ("MQTT PUBACK error %d", evt->result);
-                        break;
-                }
-
-                LOG_INF ("PUBACK packet id: %u", evt->param.puback.message_id);
-
-                break;
-
-        case MQTT_EVT_PUBREC:
-                if (evt->result != 0) {
-                        LOG_ERR ("MQTT PUBREC error %d", evt->result);
-                        break;
-                }
-
-                LOG_INF ("PUBREC packet id: %u", evt->param.pubrec.message_id);
-
-                const struct mqtt_pubrel_param rel_param = {.message_id = evt->param.pubrec.message_id};
-
-                err = mqtt_publish_qos2_release (client, &rel_param);
-                if (err != 0) {
-                        LOG_ERR ("Failed to send MQTT PUBREL: %d", err);
-                }
-
-                break;
-
-        case MQTT_EVT_PUBCOMP:
-                if (evt->result != 0) {
-                        LOG_ERR ("MQTT PUBCOMP error %d", evt->result);
-                        break;
-                }
-
-                LOG_INF ("PUBCOMP packet id: %u", evt->param.pubcomp.message_id);
-
-                break;
-
-        case MQTT_EVT_PINGRESP:
-                LOG_INF ("PINGRESP packet");
-                break;
-
-        default:
-                break;
-        }
-}
-
-static char *get_mqtt_payload (enum mqtt_qos qos)
-{
-#if APP_BLUEMIX_TOPIC
-        static char payload[30];
-
-        snprintk (payload, sizeof (payload), "{d:{temperature:%d}}", (u8_t)sys_rand32_get ());
-#else
-        static char payload[] = "DOORS:OPEN_QoSx";
-
-        payload[strlen (payload) - 1] = '0' + qos;
-#endif
-
-        return payload;
-}
-
-static char *get_mqtt_topic (void)
-{
-#if APP_BLUEMIX_TOPIC
-        return "iot-2/type/" BLUEMIX_DEVTYPE "/id/" BLUEMIX_DEVID "/evt/" BLUEMIX_EVENT "/fmt/" BLUEMIX_FORMAT;
-#else
-        return "sensors";
-#endif
-}
-
-static int publish (struct mqtt_client *client, enum mqtt_qos qos)
-{
-        struct mqtt_publish_param param;
-
-        param.message.topic.qos = qos;
-        param.message.topic.topic.utf8 = (u8_t *)get_mqtt_topic ();
-        param.message.topic.topic.size = strlen (param.message.topic.topic.utf8);
-        param.message.payload.data = get_mqtt_payload (qos);
-        param.message.payload.len = strlen (param.message.payload.data);
-        param.message_id = sys_rand32_get ();
-        param.dup_flag = 0U;
-        param.retain_flag = 0U;
-
-        return mqtt_publish (client, &param);
-}
-
-#define RC_STR(rc) ((rc) == 0 ? "OK" : "ERROR")
-
-#define PRINT_RESULT(func, rc) LOG_INF ("%s: %d <%s>", (func), rc, RC_STR (rc))
-
-static void broker_init (void)
-{
-        struct sockaddr_in *broker4 = (struct sockaddr_in *)&broker;
-
-        broker4->sin_family = AF_INET;
-        broker4->sin_port = htons (SERVER_PORT);
-        inet_pton (AF_INET, SERVER_ADDR, &broker4->sin_addr);
-}
-
-static void client_init (struct mqtt_client *client)
-{
-        mqtt_client_init (client);
-
-        broker_init ();
-
-        /* MQTT client configuration */
-        client->broker = &broker;
-        client->evt_cb = mqtt_evt_handler;
-        client->client_id.utf8 = (u8_t *)MQTT_CLIENTID;
-        client->client_id.size = strlen (MQTT_CLIENTID);
-        client->password = NULL;
-        client->user_name = NULL;
-        client->protocol_version = MQTT_VERSION_3_1_1;
-
-        /* MQTT buffers configuration */
-        client->rx_buf = rx_buffer;
-        client->rx_buf_size = sizeof (rx_buffer);
-        client->tx_buf = tx_buffer;
-        client->tx_buf_size = sizeof (tx_buffer);
-
-        /* MQTT transport configuration */
-
-        client->transport.type = MQTT_TRANSPORT_NON_SECURE;
-}
-
-/* In this routine we block until the connected variable is 1 */
-static int try_to_connect (struct mqtt_client *client)
-{
-        int rc = 0;
-        int i = 0;
-
-        while (i++ < APP_CONNECT_TRIES && !connected) {
-
-                client_init (client);
-
-                rc = mqtt_connect (client);
-                if (rc != 0) {
-                        PRINT_RESULT ("mqtt_connect", rc);
-                        k_sleep (K_MSEC (APP_SLEEP_MSECS));
-                        continue;
-                }
-
-                prepare_fds (client);
-
-                if (wait (APP_SLEEP_MSECS)) {
-                        mqtt_input (client);
-                }
-
-                if (!connected) {
-                        mqtt_abort (client);
-                }
-        }
-
-        if (connected) {
-                return 0;
-        }
-
-        return -EINVAL;
-}
-
-static int process_mqtt_and_sleep (struct mqtt_client *client, int timeout)
-{
-        s64_t remaining = timeout;
-        s64_t start_time = k_uptime_get ();
-        int rc;
-
-        while (remaining > 0 && connected) {
-                if (wait (remaining)) {
-                        rc = mqtt_input (client);
-                        if (rc != 0) {
-                                PRINT_RESULT ("mqtt_input", rc);
-                                return rc;
-                        }
-                }
-
-                rc = mqtt_live (client);
-                if (rc != 0 && rc != -EAGAIN) {
-                        PRINT_RESULT ("mqtt_live", rc);
-                        return rc;
-                }
-
-                if (rc == 0) {
-                        rc = mqtt_input (client);
-                        if (rc != 0) {
-                                PRINT_RESULT ("mqtt_input", rc);
-                                return rc;
-                        }
-                }
-
-                remaining = timeout + start_time - k_uptime_get ();
+                buf = (const char *)buf + out_len;
+                len -= out_len;
         }
 
         return 0;
 }
 
-#define SUCCESS_OR_EXIT(rc)                                                                                                                     \
-        {                                                                                                                                       \
-                if ((rc) != 0) {                                                                                                                \
-                        return 1;                                                                                                               \
-                }                                                                                                                               \
-        }
-#define SUCCESS_OR_BREAK(rc)                                                                                                                    \
-        {                                                                                                                                       \
-                if ((rc) != 0) {                                                                                                                \
-                        break;                                                                                                                  \
-                }                                                                                                                               \
-        }
-
-static int publisher (void)
+void main ()
 {
-        int i = 0;
-        int rc = 0;
-        int r = 0;
 
-        LOG_INF ("attempting to connect: ");
-        rc = try_to_connect (&client_ctx);
-        PRINT_RESULT ("try_to_connect", rc);
-        SUCCESS_OR_EXIT (rc);
+        // dhcpInit ();
 
-        i = 0;
-        while (i++ < CONFIG_NET_SAMPLE_APP_MAX_ITERATIONS && connected) {
-                r = -1;
+        // while (!dhcpIsnitializded ()) {
+        //         k_sleep (K_MSEC (2000));
+        // }
 
-                rc = mqtt_ping (&client_ctx);
-                PRINT_RESULT ("mqtt_ping", rc);
-                SUCCESS_OR_BREAK (rc);
+        struct sockaddr_in addr, client_addr;
+        socklen_t client_addr_len = sizeof (client_addr);
+        struct video_buffer *buffers[2], *vbuf;
+        int i, ret, sock, client;
+        struct video_format fmt;
+        struct device *video;
 
-                rc = process_mqtt_and_sleep (&client_ctx, APP_SLEEP_MSECS);
-                SUCCESS_OR_BREAK (rc);
+        /* Prepare Network */
+        (void)memset (&addr, 0, sizeof (addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons (MY_PORT);
 
-                rc = publish (&client_ctx, MQTT_QOS_0_AT_MOST_ONCE);
-                PRINT_RESULT ("mqtt_publish", rc);
-                SUCCESS_OR_BREAK (rc);
-
-                rc = process_mqtt_and_sleep (&client_ctx, APP_SLEEP_MSECS);
-                SUCCESS_OR_BREAK (rc);
-
-                rc = publish (&client_ctx, MQTT_QOS_1_AT_LEAST_ONCE);
-                PRINT_RESULT ("mqtt_publish", rc);
-                SUCCESS_OR_BREAK (rc);
-
-                rc = process_mqtt_and_sleep (&client_ctx, APP_SLEEP_MSECS);
-                SUCCESS_OR_BREAK (rc);
-
-                rc = publish (&client_ctx, MQTT_QOS_2_EXACTLY_ONCE);
-                PRINT_RESULT ("mqtt_publish", rc);
-                SUCCESS_OR_BREAK (rc);
-
-                rc = process_mqtt_and_sleep (&client_ctx, APP_SLEEP_MSECS);
-                SUCCESS_OR_BREAK (rc);
-
-                r = 0;
+        sock = socket (AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (sock < 0) {
+                LOG_ERR ("Failed to create TCP socket: %d", errno);
+                return;
         }
 
-        rc = mqtt_disconnect (&client_ctx);
-        PRINT_RESULT ("mqtt_disconnect", rc);
-
-        LOG_INF ("Bye!");
-
-        return r;
-}
-
-void main (void)
-{
-        int r = 0;
-        int i = 0;
-
-        dhcpInit ();
-
-        while (!dhcpIsnitializded ()) {
-                k_sleep (K_MSEC (200));
+        ret = bind (sock, (struct sockaddr *)&addr, sizeof (addr));
+        if (ret < 0) {
+                LOG_ERR ("Failed to bind TCP socket: %d", errno);
+                close (sock);
+                return;
         }
 
-        while (!CONFIG_NET_SAMPLE_APP_MAX_CONNECTIONS || i++ < CONFIG_NET_SAMPLE_APP_MAX_CONNECTIONS) {
-                r = publisher ();
+        ret = listen (sock, MAX_CLIENT_QUEUE);
+        if (ret < 0) {
+                LOG_ERR ("Failed to listen on TCP socket: %d", errno);
+                close (sock);
+                return;
+        }
 
-                if (!CONFIG_NET_SAMPLE_APP_MAX_CONNECTIONS) {
-                        k_sleep (K_MSEC (5000));
+        /* Prepare Video Capture */
+        video = device_get_binding (VIDEO_CAPTURE_DEV);
+        if (video == NULL) {
+                LOG_ERR ("Video device %s not found. Aborting test.", VIDEO_CAPTURE_DEV);
+                return;
+        }
+
+        /* Get default/native format */
+        if (video_get_format (video, VIDEO_EP_OUT, &fmt)) {
+                LOG_ERR ("Unable to retrieve video format");
+                return;
+        }
+
+        LOG_INF ("Video device detected, format: %c%c%c%c %ux%u", (char)fmt.pixelformat, (char)(fmt.pixelformat >> 8),
+                 (char)(fmt.pixelformat >> 16), (char)(fmt.pixelformat >> 24), fmt.width, fmt.height);
+
+        /* Alloc Buffers */
+        for (i = 0; i < ARRAY_SIZE (buffers); i++) {
+                buffers[i] = video_buffer_alloc (fmt.pitch * fmt.height);
+                if (buffers[i] == NULL) {
+                        LOG_ERR ("Unable to alloc video buffer");
+                        return;
                 }
         }
+
+        /* Connection loop */
+        do {
+                LOG_INF ("TCP: Waiting for client...");
+
+                client = accept (sock, (struct sockaddr *)&client_addr, &client_addr_len);
+                if (client < 0) {
+                        LOG_INF ("Failed to accept: %d", errno);
+                        return;
+                }
+
+                LOG_INF ("TCP: Accepted connection");
+
+                /* Enqueue Buffers */
+                for (i = 0; i < ARRAY_SIZE (buffers); i++) {
+                        video_enqueue (video, VIDEO_EP_OUT, buffers[i]);
+                }
+
+                /* Start video capture */
+                if (video_stream_start (video)) {
+                        LOG_ERR ("Unable to start video");
+                        return;
+                }
+
+                LOG_INF ("Stream started");
+
+                /* Capture loop */
+                i = 0;
+                do {
+                        ret = video_dequeue (video, VIDEO_EP_OUT, &vbuf, K_FOREVER);
+                        if (ret) {
+                                LOG_ERR ("Unable to dequeue video buf");
+                                return;
+                        }
+
+                        LOG_INF ("\rSending frame %d", i++);
+                        // k_sleep (K_MSEC (100));
+
+                        /* Send video buffer to TCP client */
+                        ret = sendall (client, vbuf->buffer, vbuf->bytesused);
+                        if (ret && ret != -EAGAIN) {
+                                /* client disconnected */
+                                LOG_INF ("TCP: Client disconnected %d", ret);
+                                close (client);
+                        }
+
+                        (void)video_enqueue (video, VIDEO_EP_OUT, vbuf);
+                } while (!ret);
+
+                /* stop capture */
+                if (video_stream_stop (video)) {
+                        LOG_ERR ("Unable to stop video");
+                        return;
+                }
+
+                /* Flush remaining buffers */
+                do {
+                        ret = video_dequeue (video, VIDEO_EP_OUT, &vbuf, K_NO_WAIT);
+                } while (!ret);
+
+        } while (1);
 
         while (true) {
                 k_sleep (K_MSEC (200));

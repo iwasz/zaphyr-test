@@ -7,5 +7,5 @@ project(cpp_synchronization)
 
 target_sources(app PRIVATE 
     src/main.c
-    src/dhcp.c
+    # src/dhcp.c
 )
