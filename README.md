@@ -1,5 +1,9 @@
-# Building in command line
-These are the steps I took to bring up a [NUCLEO-H743ZI](https://www.st.com/en/evaluation-tools/nucleo-h743zi.html) on Linux Manjaro and run a Zephyr 2.2.99 on it. I also wanted to set up a vscode project, and maybe try to recreate a toolchain using ct-ng (just for fun).
+# Tips
+1. When performing an update do it from `/home/iwasz/workspace/zephyrproject` directory. Use `west update`
+2. Use the default serial port that shows up (usually `/dev/ttyACM0` in my case).
+
+# Building in the command line
+These are the steps I took to bring up a [NUCLEO-H743ZI](https://www.st.com/en/evaluation-tools/nucleo-h743zi.html)/STM32F746G-DISCO on Linux Manjaro and run a Zephyr 2.2.99 on it. I also wanted to set up a vscode project, and maybe try to recreate a toolchain using ct-ng (just for fun).
 
 As of writing this my setup is as following:
 - Linux futureboy 5.4.31-1-MANJARO #1 SMP PREEMPT Wed Apr 8 10:25:32 UTC 2020 x86_64 GNU/Linux
@@ -16,7 +20,7 @@ After following instructions from [Zephyr documentation](https://docs.zephyrproj
 
 I copied a sample project (cpp_synchronization)
 
-I set environment variables (actually I have them stored in ~/.zephyrrc, and I sourced them):
+I set environment variables (actually I have them stored in ~/.zephyrrc, and I source them in `.bashrc`):
 
 ```sh
 export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
@@ -37,6 +41,17 @@ west flash
 ```
 
 As simple as that. The next very important piece of information to refer to is [this page](https://docs.zephyrproject.org/latest/application/index.html).
+
+# Updating Zephyr source and the toolchain (SDK)
+Zephyr source:
+
+```sh
+cat ~/.zephyrrc 
+cd ~/workspace/zephyrproject
+west update
+```
+
+Updating the toolchain : !?!?!?
 
 # Building in vscode
 So now I'm going to try to recreate the above experience using only the vscode. 
@@ -138,6 +153,15 @@ The above 3 parameters aren't strictly required, but I fount they worked for me 
 }
 ```
 
+# Random tips
+No ```<cstdio>``` or other C++ header? Check these settings in menuconfig:
+
+- C Library -> C Library Implementation
+  - Minimal C Library [is hosted here](https://github.com/zephyrproject-rtos/zephyr/tree/master/lib/libc/minimal). Now, I don't know if this implementation is used somewhere outside the Zephyr but using it disables libstdc++ (which is included in the toolchain).
+  - Newlib C Library. [Here are the syscalls for newlib](https://github.com/zephyrproject-rtos/zephyr/blob/master/lib/libc/newlib/libc-hooks.c).
+  - External C Library
+- Changing prj.conf file clears ```ninja guiconfig``` config.
+- **Save minimal** in ```ninja guiconfig``` works correctly only after **Save** was clicked beforehand.
 
 # TODO
 
@@ -153,86 +177,4 @@ https://github.com/zephyrproject-rtos/zephyr/issues/21119
 https://github.com/bus710/zephyr-rtos-development-in-linux
 
 Have to tweak ```ninja menuconfig``` to turn off the optimisations (-Os is the default)
-
-# Networking 
-TODO move this to another file.
-
-Networking is implemented for the ```stm32f746g_disco``.
-- (Top) → Device Drivers → Entropy Drivers → STM32 RNG driver : OFF
-- (Top) → Random subsystem → Non-random number generator : ON
-
-Without the latter option I got: ```undefined reference to `sys_rand32_get'```
-
-or ```error: 'DT_N_INST_0_st_stm32_rng_P_label' undeclared here (not in a function); did you mean 'DT_N_INST_0_st_stm32_rcc'?```
-
-if depending on the former setting. As stated [here](https://github.com/zephyrproject-rtos/zephyr/issues/15565), one can also put these into ```prj.conf```:
-
-```ini
-CONFIG_ENTROPY_GENERATOR=y
-CONFIG_TEST_RANDOM_GENERATOR=y
-
-```
-# Dynamic memory allocation in C++ and C++ support in general
-
-
-# TODO to check : 
-- Why [they write, that](https://docs.zephyrproject.org/latest/reference/kernel/other/cxx_support.html) dynamic allocation is not supported? I think this is outdated. Check.
-- Zephyr with C++. Apparently there ale plenty of Kconfig options which affect C++ usage.
-  - ZEPHYR_CPLUSPLUS
-  - MINIMAL_LIBC
-  - LIB_CPLUSPLUS
-- What dynamic memory allocation algorithms are used (in malloc a free since new and delete use them).
-- If those algorithms are dumb and lead to memory fragmentation, how can we replace them (with say umm_malloc)?
-- What are the differences between various libc implementations in this regard? [Here we can read](https://github.com/zephyrproject-rtos/zephyr/issues/18990#issuecomment-553539514) : *minimal libc currently does it with a sys_mem_pool(), newlib has its own logic which derives from a memory region implemented in lib/libc/newlib/libc-hooks.c*. [Here](https://github.com/zephyrproject-rtos/zephyr/pull/20678) they moved from using k_malloc to malloc.
-- How much memory can be allocated?
-- Compare Zephyr to FreeRTOS in this regard.
-- Do replacing week symbols malloc, calloc, free etc. is indeed so simple as I anticipated? My doubts came [from this page](https://tracker.mender.io/browse/MEN-1856) where they write : *FreeRTOS dynamic memory allocation : Probably yes, but we need to cross compile stdlib with malloc function defined in FreeRTOS.*. So why could I simply redefine malloc and free. This is what I did in the past with FreeRTOS:
-
-```c
-#include <FreeRTOS.h>
-#include <errno.h>
-#include <stdio.h>
-
-/**
- * Compatibility with libc heap allocator
- */
-extern int errno;
-
-caddr_t _sbrk (int incr)
-{
-        errno = ENOMEM;
-        return (caddr_t)-1;
-}
-
-void *malloc (size_t size) { return pvPortMalloc (size); }
-
-void *calloc (size_t num, size_t size)
-{
-        (void)num;
-        (void)size;
-        return NULL;
-}
-
-void *realloc (void *ptr, size_t size)
-{
-        (void)ptr;
-        (void)size;
-        return NULL;
-}
-
-void free (void *ptr) { vPortFree (ptr); }
-```
-
-- How to use etl and gsl and other C++ libraries (I assume this is a no-brainer, you simply compile them in).
-
-## Random tips
-No ```<cstdio>``` or other C++ header? Check these settings in menuconfig:
-
-- C Library -> C Library Implementation
-  - Minimal C Library [is hosted here](https://github.com/zephyrproject-rtos/zephyr/tree/master/lib/libc/minimal). Now, I don't know if this implementation is used somewhere outside the Zephyr but using it disables libstdc++ (which is included in the toolchain).
-  - Newlib C Library. [Here are the syscalls for newlib](https://github.com/zephyrproject-rtos/zephyr/blob/master/lib/libc/newlib/libc-hooks.c).
-  - External C Library
-- Changing prj.conf file clears ```ninja guiconfig``` config.
-- **Save minimal** in ```ninja guiconfig``` works correctly only after **Save** was clicked beforehand.
-
 
